@@ -128,6 +128,7 @@ function handleRoot(headers: Record<string, string>): Response {
   return jsonResponse({
     name: 'LumenSASDO 2.0 API',
     version: '1.0.0',
+    deployed_at: new Date().toISOString(),
     description: '智能化農產品採購決策平台',
     endpoints: {
       health: '/health',
