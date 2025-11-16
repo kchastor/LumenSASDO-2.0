@@ -1,0 +1,32 @@
+{
+  "name": "lumensasdo-cron-scraper",
+  "version": "1.0.0",
+  "description": "LumenSASDO 2.0 - Cloudflare Workers Cron Scraper",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --ext .ts",
+    "format": "prettier --write \"src/**/*.ts\""
+  },
+  "keywords": [
+    "cloudflare-workers",
+    "serverless",
+    "cron",
+    "scraper",
+    "d1-database"
+  ],
+  "author": "張格誌 (KeChih Chang)",
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20231218.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "prettier": "^3.0.0",
+    "typescript": "^5.0.0",
+    "wrangler": "^3.78.12"
+  }
+}

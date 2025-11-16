@@ -1,0 +1,26 @@
+name = "lumensasdo-cron-scraper"
+main = "src/index.ts"
+compatibility_date = "2024-11-14"
+
+# D1 Database Binding
+# 將 database_id 替換成你的實際 D1 Database ID
+# 使用 `wrangler d1 create lumensasdo-data` 建立資料庫後會提供
+[[d1_databases]]
+binding = "DB"
+database_name = "lumensasdo-data"
+database_id = "a81bffee-489e-4504-bd6f-245fec2360db"
+
+# Cron Triggers
+# 每日凌晨 3:00 (UTC) 自動執行
+[triggers]
+crons = ["0 3 * * *"]
+
+# Environment Variables (non-sensitive)
+[vars]
+ENVIRONMENT = "production"
+API_TIMEOUT = "30000"
+MAX_RETRIES = "3"
+
+# Secrets Management
+# 使用 `wrangler secret put GEMINI_API_KEY` 設定
+# - GEMINI_API_KEY: Gemini AI API 金鑰（規劃中）
