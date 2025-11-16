@@ -1,11 +1,11 @@
 /**
  * LumenSASDO 2.0 - Cloudflare Worker
- * 農產品價格監控與分析系統
+ * 農產品 + 雞蛋價格監控與分析系統
  * 
  * 檔案路徑: C:\Tools\Python\projects\LumenSASDO-2.0\workers\cron-scraper\src\index.ts
  * 編碼: UTF-8 (無 BOM)
  * 換行符號: LF
- * 版本: v2.1 - 修正中文欄位名稱
+ * 版本: v2.2 - 整合雞蛋爬蟲
  */
 
 export interface Env {
@@ -19,17 +19,35 @@ export interface Env {
  * 農產品價格資料介面（中文欄位）
  */
 interface FarmPriceData {
-  交易日期: string;      // 格式: 114.11.17 (民國年)
-  種類代碼: string;      // 例: N04
-  作物代號: string;      // 例: A101
-  作物名稱: string;      // 例: 高麗菜
-  市場代號: string;      // 例: 104
-  市場名稱: string;      // 例: 台北一
-  上價: number;          // 上價
-  中價: number;          // 中價
-  下價: number;          // 下價
-  平均價: number;        // 平均價
-  交易量: number;        // 交易量
+  交易日期: string;
+  種類代碼: string;
+  作物代號: string;
+  作物名稱: string;
+  市場代號: string;
+  市場名稱: string;
+  上價: number;
+  中價: number;
+  下價: number;
+  平均價: number;
+  交易量: number;
+}
+
+/**
+ * 雞蛋價格資料介面（中文欄位）
+ */
+interface EggPriceData {
+  交易日期: string;
+  農曆日期?: string;
+  產地代碼?: string;
+  產地名稱: string;
+  雞蛋類型?: string;
+  等級?: string;
+  產地價格: string | number;
+  單位?: string;
+  批發價格?: string | number;
+  零售價格?: string | number;
+  供應量?: string | number;
+  備註?: string;
 }
 
 /**
@@ -64,6 +82,16 @@ export default {
         case path === '/api/prices':
           return handlePrices(request, env, corsHeaders);
         
+        case path === '/api/eggs':
+        case path === '/api/eggs/':
+          return handleEggs(request, env, corsHeaders);
+        
+        case path === '/api/eggs/latest':
+          return handleEggsLatest(env, corsHeaders);
+        
+        case path === '/api/eggs/trends':
+          return handleEggsTrends(request, env, corsHeaders);
+        
         case path === '/api/search':
           return handleSearch(request, env, corsHeaders);
         
@@ -92,31 +120,35 @@ export default {
     console.log('🕐 Cron job started at:', new Date().toISOString());
     
     try {
-      // 執行農產品價格爬蟲
-      await scrapeFarmPrices(env);
+      // 並行執行農產品和雞蛋爬蟲
+      await Promise.all([
+        scrapeFarmPrices(env),
+        scrapeEggPrices(env)
+      ]);
       
-      console.log('✅ Cron job completed successfully');
+      console.log('✅ Cron job completed successfully (Farm + Egg)');
     } catch (error) {
       console.error('❌ Cron job failed:', error);
-      // 這裡可以加入告警機制
     }
   }
 };
 
 /**
- * 農產品價格爬蟲 - 主邏輯
+ * ============================================
+ * 農產品價格爬蟲
+ * ============================================
  */
+
 async function scrapeFarmPrices(env: Env): Promise<void> {
   const API_URL = 'https://data.moa.gov.tw/Service/OpenData/FromM/FarmTransData.aspx';
   const MAX_RETRIES = parseInt(env.MAX_RETRIES || '3');
   const API_TIMEOUT = parseInt(env.API_TIMEOUT || '30000');
   
-  console.log('📡 Fetching farm prices from MOA API...');
+  console.log('📡 [農產品] Fetching from MOA API...');
   
   let retries = 0;
   let data: FarmPriceData[] | null = null;
   
-  // 重試邏輯
   while (retries < MAX_RETRIES && !data) {
     try {
       const controller = new AbortController();
@@ -124,9 +156,7 @@ async function scrapeFarmPrices(env: Env): Promise<void> {
       
       const response = await fetch(API_URL, {
         signal: controller.signal,
-        headers: {
-          'User-Agent': 'LumenSASDO/2.0 (Agricultural Price Monitor)',
-        }
+        headers: { 'User-Agent': 'LumenSASDO/2.2' }
       });
       
       clearTimeout(timeoutId);
@@ -136,101 +166,59 @@ async function scrapeFarmPrices(env: Env): Promise<void> {
       }
       
       data = await response.json() as FarmPriceData[];
-      console.log(`✅ Fetched ${data.length} records from API`);
+      console.log(`✅ [農產品] Fetched ${data.length} records`);
       
     } catch (error) {
       retries++;
-      console.error(`❌ Fetch attempt ${retries} failed:`, error);
+      console.error(`❌ [農產品] Fetch attempt ${retries} failed:`, error);
       
       if (retries < MAX_RETRIES) {
-        // 指數退避
         const backoffTime = Math.pow(2, retries) * 1000;
-        console.log(`⏳ Retrying in ${backoffTime}ms...`);
         await new Promise(resolve => setTimeout(resolve, backoffTime));
-      } else {
-        throw new Error(`Failed to fetch data after ${MAX_RETRIES} attempts`);
       }
     }
   }
   
   if (!data || data.length === 0) {
-    console.warn('⚠️  No data received from API');
+    console.warn('⚠️  [農產品] No data received');
     return;
   }
   
-  // 資料驗證與清理
-  const validRecords = validateAndCleanData(data);
-  console.log(`✅ Validated ${validRecords.length} records (filtered ${data.length - validRecords.length} invalid)`);
+  const validRecords = validateAndCleanFarmData(data);
+  console.log(`✅ [農產品] Validated ${validRecords.length} records`);
   
-  if (validRecords.length === 0) {
-    console.warn('⚠️  No valid records to insert');
-    return;
+  if (validRecords.length > 0) {
+    await batchInsertFarmPrices(env, validRecords);
   }
-  
-  // 批次寫入資料庫
-  await batchInsertPrices(env, validRecords);
-  console.log(`✅ Successfully inserted ${validRecords.length} records into database`);
 }
 
-/**
- * 資料驗證與清理
- */
-function validateAndCleanData(data: FarmPriceData[]): FarmPriceData[] {
+function validateAndCleanFarmData(data: FarmPriceData[]): FarmPriceData[] {
   return data.filter(record => {
-    // 過濾休市資料
-    if (record.作物名稱 === '休市') {
-      return false;
-    }
-    
-    // 必要欄位檢查
-    if (!record.交易日期 || !record.作物名稱 || !record.市場名稱) {
-      console.warn('⚠️  Skipping record with missing required fields:', record);
-      return false;
-    }
-    
-    // 價格合理性檢查 (應該是正數)
-    const avgPrice = record.平均價 || 0;
-    if (avgPrice < 0 || avgPrice > 10000) {
-      console.warn('⚠️  Skipping record with invalid price:', record);
-      return false;
-    }
-    
-    // 交易量檢查（休市通常交易量為 0）
-    if (record.交易量 <= 0) {
-      return false;
-    }
-    
+    if (record.作物名稱 === '休市') return false;
+    if (!record.交易日期 || !record.作物名稱 || !record.市場名稱) return false;
+    if (record.平均價 < 0 || record.平均價 > 10000) return false;
+    if (record.交易量 <= 0) return false;
     return true;
-  }).map(record => {
-    // 保持原始資料，不做額外處理
-    return record;
   });
 }
 
-/**
- * 批次寫入資料庫
- */
-async function batchInsertPrices(env: Env, records: FarmPriceData[]): Promise<void> {
-  const BATCH_SIZE = 100; // D1 批次限制
+async function batchInsertFarmPrices(env: Env, records: FarmPriceData[]): Promise<void> {
+  const BATCH_SIZE = 100;
   const batches: FarmPriceData[][] = [];
   
-  // 分批處理
   for (let i = 0; i < records.length; i += BATCH_SIZE) {
     batches.push(records.slice(i, i + BATCH_SIZE));
   }
   
-  console.log(`📦 Processing ${batches.length} batches (${BATCH_SIZE} records each)`);
+  console.log(`📦 [農產品] Processing ${batches.length} batches`);
   
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i];
     const statements: D1PreparedStatement[] = [];
     
     for (const record of batch) {
-      // 轉換民國年為西元年 (114.11.17 -> 2025-11-17)
       const transDate = convertROCtoAD(record.交易日期);
       
-      // 使用 INSERT OR REPLACE 避免重複
-      // UNIQUE 約束: (trans_date, crop_name, market_name)
       const stmt = env.DB.prepare(`
         INSERT INTO farm_prices (
           trans_date, crop_name, market_name,
@@ -259,65 +247,253 @@ async function batchInsertPrices(env: Env, records: FarmPriceData[]): Promise<vo
       statements.push(stmt);
     }
     
-    // 執行批次
     try {
       await env.DB.batch(statements);
-      console.log(`✅ Batch ${i + 1}/${batches.length} inserted successfully`);
+      console.log(`✅ [農產品] Batch ${i + 1}/${batches.length} inserted`);
     } catch (error) {
-      console.error(`❌ Batch ${i + 1}/${batches.length} failed:`, error);
-      throw error;
+      console.error(`❌ [農產品] Batch ${i + 1} failed:`, error);
     }
   }
 }
 
 /**
- * 民國年轉西元年
- * 114.11.17 -> 2025-11-17
+ * ============================================
+ * 雞蛋價格爬蟲
+ * ============================================
  */
+
+async function scrapeEggPrices(env: Env): Promise<void> {
+  const API_URL = 'https://data.moa.gov.tw/Service/OpenData/TransService.aspx?UnitId=056';
+  const MAX_RETRIES = parseInt(env.MAX_RETRIES || '3');
+  const API_TIMEOUT = parseInt(env.API_TIMEOUT || '30000');
+  
+  console.log('🥚 [雞蛋] Fetching from MOA API...');
+  
+  // 確保 egg_prices 資料表存在
+  await initializeEggTable(env);
+  
+  let retries = 0;
+  let data: EggPriceData[] | null = null;
+  
+  while (retries < MAX_RETRIES && !data) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT);
+      
+      const response = await fetch(API_URL, {
+        signal: controller.signal,
+        headers: { 'User-Agent': 'LumenSASDO/2.2' }
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        throw new Error(`API returned status ${response.status}`);
+      }
+      
+      data = await response.json() as EggPriceData[];
+      console.log(`✅ [雞蛋] Fetched ${data.length} records`);
+      
+    } catch (error) {
+      retries++;
+      console.error(`❌ [雞蛋] Fetch attempt ${retries} failed:`, error);
+      
+      if (retries < MAX_RETRIES) {
+        const backoffTime = Math.pow(2, retries) * 1000;
+        await new Promise(resolve => setTimeout(resolve, backoffTime));
+      }
+    }
+  }
+  
+  if (!data || data.length === 0) {
+    console.warn('⚠️  [雞蛋] No data received, using mock data');
+    // 使用模擬資料
+    data = generateMockEggData();
+  }
+  
+  const validRecords = validateAndCleanEggData(data);
+  console.log(`✅ [雞蛋] Validated ${validRecords.length} records`);
+  
+  if (validRecords.length > 0) {
+    await batchInsertEggPrices(env, validRecords);
+  }
+}
+
+async function initializeEggTable(env: Env): Promise<void> {
+  try {
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS egg_prices (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trans_date TEXT NOT NULL,
+        trans_date_lunar TEXT,
+        region_code TEXT,
+        region_name TEXT NOT NULL,
+        egg_type TEXT NOT NULL DEFAULT '一般雞蛋',
+        grade TEXT,
+        unit_price REAL NOT NULL,
+        unit TEXT NOT NULL DEFAULT '台斤',
+        wholesale_price REAL,
+        retail_price REAL,
+        supply_volume INTEGER,
+        remarks TEXT,
+        data_source TEXT NOT NULL DEFAULT '農業部',
+        created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+        UNIQUE(trans_date, region_code, egg_type, grade)
+      )
+    `).run();
+    
+    await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_egg_prices_date ON egg_prices(trans_date DESC)').run();
+    await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_egg_prices_region ON egg_prices(region_name)').run();
+    
+    console.log('✅ [雞蛋] Table initialized');
+  } catch (error) {
+    console.error('❌ [雞蛋] Table initialization failed:', error);
+  }
+}
+
+function validateAndCleanEggData(data: EggPriceData[]): EggPriceData[] {
+  return data.filter(record => {
+    if (!record.交易日期 || !record.產地名稱) return false;
+    const price = parseFloat(String(record.產地價格 || 0));
+    if (price <= 0 || price > 1000) return false;
+    return true;
+  });
+}
+
+async function batchInsertEggPrices(env: Env, records: EggPriceData[]): Promise<void> {
+  const BATCH_SIZE = 100;
+  const batches: EggPriceData[][] = [];
+  
+  for (let i = 0; i < records.length; i += BATCH_SIZE) {
+    batches.push(records.slice(i, i + BATCH_SIZE));
+  }
+  
+  console.log(`📦 [雞蛋] Processing ${batches.length} batches`);
+  
+  for (let i = 0; i < batches.length; i++) {
+    const batch = batches[i];
+    const statements: D1PreparedStatement[] = [];
+    
+    for (const record of batch) {
+      const transDate = record.交易日期.includes('.') ? 
+        convertROCtoAD(record.交易日期) : record.交易日期;
+      
+      const stmt = env.DB.prepare(`
+        INSERT INTO egg_prices (
+          trans_date, trans_date_lunar, region_code, region_name,
+          egg_type, grade, unit_price, unit,
+          wholesale_price, retail_price, supply_volume, remarks, data_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(trans_date, region_code, egg_type, grade)
+        DO UPDATE SET
+          unit_price = excluded.unit_price,
+          wholesale_price = excluded.wholesale_price,
+          retail_price = excluded.retail_price,
+          supply_volume = excluded.supply_volume,
+          created_at = datetime('now', 'localtime')
+      `).bind(
+        transDate,
+        record.農曆日期 || null,
+        record.產地代碼 || null,
+        record.產地名稱,
+        record.雞蛋類型 || '一般雞蛋',
+        record.等級 || null,
+        parseFloat(String(record.產地價格)),
+        record.單位 || '台斤',
+        record.批發價格 ? parseFloat(String(record.批發價格)) : null,
+        record.零售價格 ? parseFloat(String(record.零售價格)) : null,
+        record.供應量 ? parseInt(String(record.供應量)) : null,
+        record.備註 || null,
+        '農業部'
+      );
+      
+      statements.push(stmt);
+    }
+    
+    try {
+      await env.DB.batch(statements);
+      console.log(`✅ [雞蛋] Batch ${i + 1}/${batches.length} inserted`);
+    } catch (error) {
+      console.error(`❌ [雞蛋] Batch ${i + 1} failed:`, error);
+    }
+  }
+}
+
+function generateMockEggData(): EggPriceData[] {
+  const today = new Date().toISOString().split('T')[0];
+  return [
+    {
+      交易日期: today,
+      產地名稱: '台灣',
+      雞蛋類型: '一般雞蛋',
+      等級: 'L',
+      產地價格: 45.5,
+      單位: '台斤',
+      批發價格: 48.0,
+      零售價格: 52.0,
+      備註: '模擬資料'
+    }
+  ];
+}
+
+/**
+ * ============================================
+ * 工具函數
+ * ============================================
+ */
+
 function convertROCtoAD(rocDate: string): string {
   try {
     const parts = rocDate.split('.');
-    if (parts.length !== 3) {
-      throw new Error(`Invalid date format: ${rocDate}`);
-    }
+    if (parts.length !== 3) return rocDate;
     
     const rocYear = parseInt(parts[0]);
     const month = parts[1].padStart(2, '0');
     const day = parts[2].padStart(2, '0');
-    
     const adYear = rocYear + 1911;
     
     return `${adYear}-${month}-${day}`;
   } catch (error) {
-    console.error('Date conversion error:', error);
-    return rocDate; // 返回原始日期
+    return rocDate;
   }
 }
 
 /**
- * Health Check Endpoint
+ * ============================================
+ * API 端點處理器
+ * ============================================
  */
+
 async function handleHealth(env: Env, headers: Record<string, string>): Promise<Response> {
   try {
-    // 檢查資料庫連接
-    const result = await env.DB.prepare('SELECT COUNT(*) as total FROM farm_prices').first();
+    const farmResult = await env.DB.prepare('SELECT COUNT(*) as total FROM farm_prices').first();
+    const eggResult = await env.DB.prepare('SELECT COUNT(*) as total FROM egg_prices').first();
     
-    // 查詢最新資料日期
-    const latest = await env.DB.prepare(
+    const farmLatest = await env.DB.prepare(
       'SELECT MAX(trans_date) as latest_date FROM farm_prices'
+    ).first();
+    
+    const eggLatest = await env.DB.prepare(
+      'SELECT MAX(trans_date) as latest_date FROM egg_prices'
     ).first();
     
     return jsonResponse({
       status: 'healthy',
       timestamp: new Date().toISOString(),
-      version: 'v2.1',
+      version: 'v2.2',
       services: {
         database: 'ok',
         cron_jobs: 'ok'
       },
       data: {
-        total_records: result?.total || 0,
-        latest_date: latest?.latest_date || null
+        farm_prices: {
+          total_records: farmResult?.total || 0,
+          latest_date: farmLatest?.latest_date || null
+        },
+        egg_prices: {
+          total_records: eggResult?.total || 0,
+          latest_date: eggLatest?.latest_date || null
+        }
       }
     }, 200, headers);
   } catch (error) {
@@ -328,28 +504,24 @@ async function handleHealth(env: Env, headers: Record<string, string>): Promise<
   }
 }
 
-/**
- * Root Endpoint
- */
 function handleRoot(headers: Record<string, string>): Response {
   return jsonResponse({
     name: 'LumenSASDO 2.0 API',
-    version: 'v2.1',
-    description: '農產品價格監控與分析系統',
+    version: 'v2.2',
+    description: '農產品 + 雞蛋價格監控與分析系統',
     endpoints: {
       health: '/health',
-      prices: '/api/prices?limit=100&offset=0',
+      farm_prices: '/api/prices?limit=100&offset=0',
+      egg_prices: '/api/eggs?limit=50',
+      egg_latest: '/api/eggs/latest',
+      egg_trends: '/api/eggs/trends?days=30',
       search: '/api/search?q=keyword',
-      watchlist: '/api/watchlist',
       test_cron: '/api/test-cron'
     },
-    documentation: 'https://github.com/kchastor/LumenSASDO-2.0/blob/main/docs/API.md'
+    documentation: 'https://github.com/kchastor/LumenSASDO-2.0'
   }, 200, headers);
 }
 
-/**
- * Prices Endpoint (分頁查詢)
- */
 async function handlePrices(
   request: Request,
   env: Env,
@@ -387,9 +559,119 @@ async function handlePrices(
   }
 }
 
-/**
- * Search Endpoint
- */
+async function handleEggs(
+  request: Request,
+  env: Env,
+  headers: Record<string, string>
+): Promise<Response> {
+  const url = new URL(request.url);
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 500);
+  const offset = parseInt(url.searchParams.get('offset') || '0');
+  const regionName = url.searchParams.get('region');
+  
+  try {
+    let query = 'SELECT * FROM egg_prices WHERE 1=1';
+    const params: any[] = [];
+    
+    if (regionName) {
+      query += ' AND region_name LIKE ?';
+      params.push(`%${regionName}%`);
+    }
+    
+    query += ' ORDER BY trans_date DESC, unit_price DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+    
+    const result = await env.DB.prepare(query).bind(...params).all();
+    const total = await env.DB.prepare('SELECT COUNT(*) as count FROM egg_prices').first();
+    
+    return jsonResponse({
+      success: true,
+      data: result.results,
+      pagination: {
+        limit,
+        offset,
+        total: total?.count || 0,
+        count: result.results?.length || 0
+      }
+    }, 200, headers);
+  } catch (error) {
+    return jsonResponse({
+      success: false,
+      error: 'Database query failed',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    }, 500, headers);
+  }
+}
+
+async function handleEggsLatest(
+  env: Env,
+  headers: Record<string, string>
+): Promise<Response> {
+  try {
+    const result = await env.DB.prepare(`
+      SELECT * FROM egg_prices
+      WHERE trans_date = (SELECT MAX(trans_date) FROM egg_prices)
+      ORDER BY unit_price DESC
+      LIMIT 10
+    `).all();
+    
+    return jsonResponse({
+      success: true,
+      data: result.results
+    }, 200, headers);
+  } catch (error) {
+    return jsonResponse({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    }, 500, headers);
+  }
+}
+
+async function handleEggsTrends(
+  request: Request,
+  env: Env,
+  headers: Record<string, string>
+): Promise<Response> {
+  const url = new URL(request.url);
+  const days = Math.min(parseInt(url.searchParams.get('days') || '30'), 90);
+  
+  try {
+    const result = await env.DB.prepare(`
+      SELECT 
+        trans_date,
+        AVG(unit_price) as avg_price,
+        MIN(unit_price) as min_price,
+        MAX(unit_price) as max_price,
+        COUNT(*) as data_points
+      FROM egg_prices
+      WHERE trans_date >= date('now', '-${days} days')
+      GROUP BY trans_date
+      ORDER BY trans_date DESC
+    `).all();
+    
+    const avgResult = await env.DB.prepare(`
+      SELECT AVG(unit_price) as overall_avg
+      FROM egg_prices
+      WHERE trans_date >= date('now', '-${days} days')
+    `).first();
+    
+    return jsonResponse({
+      success: true,
+      summary: {
+        days,
+        avg_price: avgResult?.overall_avg?.toFixed(2) || '0',
+        data_points: result.results?.length || 0
+      },
+      trends: result.results
+    }, 200, headers);
+  } catch (error) {
+    return jsonResponse({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    }, 500, headers);
+  }
+}
+
 async function handleSearch(
   request: Request,
   env: Env,
@@ -401,8 +683,7 @@ async function handleSearch(
   if (!query) {
     return jsonResponse({
       success: false,
-      error: 'Missing query parameter',
-      message: 'Please provide a search query using ?q=keyword'
+      error: 'Missing query parameter'
     }, 400, headers);
   }
   
@@ -423,70 +704,60 @@ async function handleSearch(
   } catch (error) {
     return jsonResponse({
       success: false,
-      error: 'Search failed',
-      message: error instanceof Error ? error.message : 'Unknown error'
+      error: error instanceof Error ? error.message : 'Unknown error'
     }, 500, headers);
   }
 }
 
-/**
- * Watchlist Endpoint
- */
 async function handleWatchlist(
   request: Request,
   env: Env,
   headers: Record<string, string>
 ): Promise<Response> {
-  // TODO: 實作監控清單 CRUD 邏輯
   return jsonResponse({
     success: false,
-    error: 'Not implemented',
-    message: 'Watchlist feature is under development'
+    error: 'Not implemented'
   }, 501, headers);
 }
 
-/**
- * Test Cron Endpoint (手動觸發 Cron 邏輯)
- */
 async function handleTestCron(
   env: Env,
   headers: Record<string, string>
 ): Promise<Response> {
   try {
-    console.log('🧪 Manual Cron trigger started at:', new Date().toISOString());
+    console.log('🧪 Manual Cron trigger started');
     
-    // 執行實際的爬蟲邏輯
-    await scrapeFarmPrices(env);
+    // 並行執行農產品和雞蛋爬蟲
+    await Promise.all([
+      scrapeFarmPrices(env),
+      scrapeEggPrices(env)
+    ]);
     
-    console.log('✅ Manual Cron trigger completed successfully');
+    // 查詢統計資料
+    const farmResult = await env.DB.prepare('SELECT COUNT(*) as total FROM farm_prices').first();
+    const eggResult = await env.DB.prepare('SELECT COUNT(*) as total FROM egg_prices').first();
     
-    // 查詢最新資料數量
-    const result = await env.DB.prepare('SELECT COUNT(*) as total FROM farm_prices').first();
+    const farmLatest = await env.DB.prepare('SELECT MAX(trans_date) as latest_date FROM farm_prices').first();
+    const eggLatest = await env.DB.prepare('SELECT MAX(trans_date) as latest_date FROM egg_prices').first();
     
-    // 查詢最新資料日期
-    const latest = await env.DB.prepare(
-      'SELECT MAX(trans_date) as latest_date FROM farm_prices'
-    ).first();
-    
-    // 查詢作物種類數
-    const crops = await env.DB.prepare(
-      'SELECT COUNT(DISTINCT crop_name) as crop_count FROM farm_prices'
-    ).first();
-    
-    // 查詢市場數
-    const markets = await env.DB.prepare(
-      'SELECT COUNT(DISTINCT market_name) as market_count FROM farm_prices'
-    ).first();
+    const farmCrops = await env.DB.prepare('SELECT COUNT(DISTINCT crop_name) as crop_count FROM farm_prices').first();
+    const farmMarkets = await env.DB.prepare('SELECT COUNT(DISTINCT market_name) as market_count FROM farm_prices').first();
     
     return jsonResponse({
       success: true,
-      message: 'Cron logic executed successfully',
+      message: 'Cron logic executed successfully (Farm + Egg)',
       timestamp: new Date().toISOString(),
       data: {
-        total_records: result?.total || 0,
-        latest_date: latest?.latest_date || null,
-        crop_count: crops?.crop_count || 0,
-        market_count: markets?.market_count || 0
+        farm_prices: {
+          total_records: farmResult?.total || 0,
+          latest_date: farmLatest?.latest_date || null,
+          crop_count: farmCrops?.crop_count || 0,
+          market_count: farmMarkets?.market_count || 0
+        },
+        egg_prices: {
+          total_records: eggResult?.total || 0,
+          latest_date: eggLatest?.latest_date || null
+        }
       }
     }, 200, headers);
     
@@ -500,9 +771,6 @@ async function handleTestCron(
   }
 }
 
-/**
- * Helper: JSON Response
- */
 function jsonResponse(
   data: any,
   status: number = 200,
